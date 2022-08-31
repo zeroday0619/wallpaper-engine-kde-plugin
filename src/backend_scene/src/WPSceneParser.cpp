@@ -4,9 +4,9 @@
 #include "Utils/String.h"
 #include "Utils/Logging.h"
 #include "Utils/Algorism.h"
-#include "Utils/ArrayHelper.hpp"
-#include "Utils/Visitors.hpp"
-#include "Utils/StringHelper.hpp"
+#include "Core/Visitors.hpp"
+#include "Core/StringHelper.hpp"
+#include "Core/ArrayHelper.hpp"
 #include "SpecTexs.hpp"
 
 #include "WPShaderParser.hpp"
@@ -27,6 +27,7 @@
 
 #include "Fs/VFS.h"
 
+#include <algorithm>
 #include <iostream>
 #include <sstream>
 #include <string>
@@ -41,12 +42,9 @@
 using namespace wallpaper;
 using namespace Eigen;
 
-typedef std::function<float()> RandomFn;
-
 std::string getAddr(void* p) { return std::to_string(reinterpret_cast<intptr_t>(p)); }
 
 struct ParseContext {
-    RandomFn               randomFn;
     std::shared_ptr<Scene> scene;
     WPShaderValueUpdater*  shader_updater;
     i32                    ortho_w;
@@ -163,28 +161,41 @@ void LoadControlPoint(ParticleSubSystem& pSys, const wpscene::Particle& wp) {
     }
 }
 void LoadInitializer(ParticleSubSystem& pSys, const wpscene::Particle& wp,
-                     const wpscene::ParticleInstanceoverride& over, RandomFn& randomFn) {
+                     const wpscene::ParticleInstanceoverride& over) {
     for (const auto& ini : wp.initializers) {
-        pSys.AddInitializer(WPParticleParser::genParticleInitOp(ini, randomFn));
+        pSys.AddInitializer(WPParticleParser::genParticleInitOp(ini));
     }
     if (over.enabled) pSys.AddInitializer(WPParticleParser::genOverrideInitOp(over));
 }
 void LoadOperator(ParticleSubSystem& pSys, const wpscene::Particle& wp,
-                  const wpscene::ParticleInstanceoverride& over, RandomFn& randomFn) {
+                  const wpscene::ParticleInstanceoverride& over) {
     for (const auto& op : wp.operators) {
-        pSys.AddOperator(WPParticleParser::genParticleOperatorOp(op, randomFn, over));
+        pSys.AddOperator(WPParticleParser::genParticleOperatorOp(op, over));
     }
 }
 void LoadEmitter(ParticleSubSystem& pSys, const wpscene::Particle& wp, float count,
-                 RandomFn& randomFn, bool render_rope) {
+                 bool render_rope) {
     bool sort = render_rope;
     for (const auto& em : wp.emitters) {
         auto newEm = em;
         newEm.rate *= count;
         // newEm.origin[2] -= perspectiveZ;
-        pSys.AddEmitter(WPParticleParser::genParticleEmittOp(newEm, randomFn, sort));
+        pSys.AddEmitter(WPParticleParser::genParticleEmittOp(newEm, sort));
     }
 }
+
+ParticleSubSystem::SpawnType ParseSpawnType(std::string_view str) {
+    using ST = ParticleSubSystem::SpawnType;
+    ST type { ST::STATIC };
+    if (str == "eventfollow") {
+        type = ST::EVENT_FOLLOW;
+    } else if (str == "eventspawn") {
+        type = ST::EVENT_SPAWN;
+    } else if (str == "eventdeath") {
+        type = ST::EVENT_DEATH;
+    }
+    return type;
+};
 
 BlendMode ParseBlendMode(std::string_view str) {
     BlendMode bm;
@@ -522,14 +533,6 @@ void InitContext(ParseContext& context, fs::VFS& vfs, wpscene::WPScene& sc) {
         cam_para.delay          = sc.general.cameraparallaxdelay;
         cam_para.mouseinfluence = sc.general.cameraparallaxmouseinfluence;
         context.shader_updater->SetCameraParallax(cam_para);
-    }
-
-    {
-        auto ur          = std::make_shared<std::uniform_real_distribution<float>>(0.0f, 1.0f);
-        auto randomSeed  = std::make_shared<std::default_random_engine>();
-        context.randomFn = [randomSeed, ur]() {
-            return (*ur)(*randomSeed);
-        };
     }
 }
 
@@ -878,28 +881,74 @@ void ParseImageObj(ParseContext& context, wpscene::WPImageObject& img_obj) {
     context.scene->sceneGraph->AppendChild(spImgNode);
 }
 
-void ParseParticleObj(ParseContext& context, wpscene::WPParticleObject& particle) {
-    auto& wppartobj = particle;
-    auto& vfs       = *context.vfs;
+struct ParticleChildPtr {
+    wpscene::ParticleChild* child { nullptr };
+    SceneNode*              node_parent { nullptr };
+    ParticleSubSystem*      particle_parent { nullptr };
 
-    auto wppartRenderer = wppartobj.particleObj.renderers.at(0);
+    i32 max_instancecount { 1 };
+};
+
+void ParseParticleObj(ParseContext& context, wpscene::WPParticleObject& wppartobj,
+                      ParticleChildPtr child_ptr = {}) {
+    struct ChildData {
+        ChildData() = default;
+        ChildData(const wpscene::ParticleChild& o)
+            : type(o.type),
+              maxcount(o.maxcount),
+              controlpointstartindex(o.controlpointstartindex),
+              probability(o.probability) {}
+        std::string type { "static" };
+        i32         maxcount { 20 };
+        i32         controlpointstartindex { 0 };
+        float       probability { 1.0f };
+    };
+
+    wpscene::Particle*         p_particle_obj { nullptr };
+    std::shared_ptr<SceneNode> spNode;
+    ChildData                  child_data;
+
+    bool is_child = child_ptr.child != nullptr;
+    if (is_child) {
+        p_particle_obj = &(child_ptr.child->obj);
+        spNode         = std::make_shared<SceneNode>(Vector3f(child_ptr.child->origin.data()),
+                                             Vector3f(child_ptr.child->scale.data()),
+                                             Vector3f(child_ptr.child->angles.data()));
+        child_data     = ChildData(*child_ptr.child);
+
+        child_ptr.max_instancecount *= child_data.maxcount;
+
+    } else {
+        p_particle_obj = &wppartobj.particleObj;
+        spNode         = std::make_shared<SceneNode>(Vector3f(wppartobj.origin.data()),
+                                             Vector3f(wppartobj.scale.data()),
+                                             Vector3f(wppartobj.angles.data()));
+    }
+
+    wpscene::ParticleInstanceoverride override = wppartobj.instanceoverride;
+
+    auto& particle_obj = *p_particle_obj;
+    auto& vfs          = *context.vfs;
+
+    auto wppartRenderer = particle_obj.renderers.at(0);
     bool render_rope    = sstart_with(wppartRenderer.name, "rope");
     bool hastrail       = send_with(wppartRenderer.name, "trail");
 
-    if (render_rope) wppartobj.material.shader = "genericropeparticle";
+    if (render_rope) particle_obj.material.shader = "genericropeparticle";
 
     // wppartobj.origin[1] = context.ortho_h - wppartobj.origin[1];
 
-    auto spNode = std::make_shared<SceneNode>(Vector3f(wppartobj.origin.data()),
-                                              Vector3f(wppartobj.scale.data()),
-                                              Vector3f(wppartobj.angles.data()));
-    if (wppartobj.particleObj.flags[wpscene::Particle::FlagEnum::perspective]) {
+    if (particle_obj.flags[wpscene::Particle::FlagEnum::perspective]) {
         spNode->SetCamera("global_perspective");
     }
 
     SceneMaterial     material;
     WPShaderValueData svData;
-    svData.parallaxDepth = { wppartobj.parallaxDepth[0], wppartobj.parallaxDepth[1] };
+
+    if (! is_child) {
+        svData.parallaxDepth = { wppartobj.parallaxDepth[0], wppartobj.parallaxDepth[1] };
+    }
+
     WPShaderInfo shaderInfo;
     shaderInfo.baseConstSvs                         = context.global_base_uniforms;
     shaderInfo.baseConstSvs["g_OrientationUp"]      = std::array { 0.0f, 1.0f, 0.0f };
@@ -908,8 +957,8 @@ void ParseParticleObj(ParseContext& context, wpscene::WPParticleObject& particle
     shaderInfo.baseConstSvs["g_ViewUp"]             = std::array { 0.0f, 1.0f, 0.0f };
     shaderInfo.baseConstSvs["g_ViewRight"]          = std::array { 1.0f, 0.0f, 0.0f };
 
-    uint32_t maxcount = wppartobj.particleObj.maxcount;
-    maxcount          = maxcount > 4000 ? 4000 : maxcount;
+    u32 maxcount = particle_obj.maxcount;
+    maxcount     = std::min(maxcount, 20000u);
 
     if (hastrail) {
         double in_SegmentUVTimeOffset           = 0.0;
@@ -924,12 +973,12 @@ void ParseParticleObj(ParseContext& context, wpscene::WPParticleObject& particle
         shaderInfo.combos["TRAILRENDERER"] = "1";
     }
 
-    if (! wppartobj.particleObj.flags[wpscene::Particle::FlagEnum::spritenoframeblending]) {
+    if (! particle_obj.flags[wpscene::Particle::FlagEnum::spritenoframeblending]) {
         shaderInfo.combos["SPRITESHEETBLEND"] = "1";
     }
 
     if (! LoadMaterial(vfs,
-                       wppartobj.material,
+                       particle_obj.material,
                        context.scene.get(),
                        spNode.get(),
                        &material,
@@ -938,28 +987,34 @@ void ParseParticleObj(ParseContext& context, wpscene::WPParticleObject& particle
         LOG_ERROR("load particleobj '%s' material faild", wppartobj.name.c_str());
         return;
     }
-    LoadConstvalue(material, wppartobj.material, shaderInfo);
+    LoadConstvalue(material, particle_obj.material, shaderInfo);
     auto  spMesh             = std::make_shared<SceneMesh>(true);
     auto& mesh               = *spMesh;
-    auto  animationmode      = ToAnimMode(wppartobj.particleObj.animationmode);
-    auto  sequencemultiplier = wppartobj.particleObj.sequencemultiplier;
+    auto  animationmode      = ToAnimMode(particle_obj.animationmode);
+    auto  sequencemultiplier = particle_obj.sequencemultiplier;
     bool  hasSprite          = material.hasSprite;
     (void)hasSprite;
 
     bool thick_format = material.hasSprite || hastrail;
-    if (render_rope)
-        SetRopeParticleMesh(mesh, wppartobj.particleObj, maxcount, thick_format);
-    else
-        SetParticleMesh(mesh, wppartobj.particleObj, maxcount, thick_format);
+    {
+        u32 mesh_maxcount = maxcount * (u32)child_ptr.max_instancecount;
+        if (render_rope)
+            SetRopeParticleMesh(mesh, particle_obj, mesh_maxcount, thick_format);
+        else
+            SetParticleMesh(mesh, particle_obj, mesh_maxcount, thick_format);
+    }
 
     auto particleSub = std::make_unique<ParticleSubSystem>(
         *context.scene->paritileSys,
         spMesh,
         maxcount,
-        wppartobj.instanceoverride.rate,
+        override.rate,
+        child_data.maxcount,
+        child_data.probability,
+        ParseSpawnType(child_data.type),
         [=](const Particle& p, const ParticleRawGenSpec& spec) {
             auto& lifetime = *(spec.lifetime);
-            if (lifetime < 0.0f) {
+            if (lifetime <= 0.0f) {
                 lifetime = 0.0f;
                 return;
             }
@@ -971,21 +1026,35 @@ void ParseParticleObj(ParseContext& context, wpscene::WPParticleObject& particle
             }
         });
 
-    LoadEmitter(*particleSub,
-                wppartobj.particleObj,
-                wppartobj.instanceoverride.count,
-                context.randomFn,
-                render_rope);
-    LoadInitializer(
-        *particleSub, wppartobj.particleObj, wppartobj.instanceoverride, context.randomFn);
-    LoadOperator(*particleSub, wppartobj.particleObj, wppartobj.instanceoverride, context.randomFn);
-    LoadControlPoint(*particleSub, wppartobj.particleObj);
+    LoadEmitter(*particleSub, particle_obj, override.count, render_rope);
+    LoadInitializer(*particleSub, particle_obj, override);
+    LoadOperator(*particleSub, particle_obj, override);
+    LoadControlPoint(*particleSub, particle_obj);
 
-    context.scene->paritileSys->subsystems.emplace_back(std::move(particleSub));
     mesh.AddMaterial(std::move(material));
     spNode->AddMesh(spMesh);
     context.shader_updater->SetNodeData(spNode.get(), svData);
-    context.scene->sceneGraph->AppendChild(spNode);
+
+    for (auto& child : particle_obj.children) {
+        ParseParticleObj(context,
+                         wppartobj,
+                         {
+                             .child             = &child,
+                             .node_parent       = spNode.get(),
+                             .particle_parent   = particleSub.get(),
+                             .max_instancecount = child_ptr.max_instancecount,
+                         });
+    }
+
+    if (is_child)
+        child_ptr.particle_parent->AddChild(std::move(particleSub));
+    else
+        context.scene->paritileSys->subsystems.emplace_back(std::move(particleSub));
+
+    if (is_child)
+        child_ptr.node_parent->AppendChild(spNode);
+    else
+        context.scene->sceneGraph->AppendChild(spNode);
 }
 
 void ParseLightObj(ParseContext& context, wpscene::WPLightObject& light_obj) {

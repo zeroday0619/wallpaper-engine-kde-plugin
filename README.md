@@ -9,7 +9,7 @@ A wallpaper plugin integrating [wallpaper engine](https://store.steampowered.com
   - Screen Locking is not supported, please not use this plugin in screen locking.  
 - Support **scene(2d)**,**video**,**web** wallpaper types
 - Requires *Wallpaper Engine* installed on steam
-- Requires c++20(gcc 10+)
+- Requires C++20(gcc 10+)
 - Requires Python 3.5+
 - Requires Qt 5.13+ for playing video(no mpv), or mpv instead  
 - Requires Vulkan 1.1+, Opengl [External Memory Object](https://www.khronos.org/registry/OpenGL/extensions/EXT/EXT_external_objects.txt) extension
@@ -89,9 +89,9 @@ sudo make install
 	- *Wallpaper Engine* needs to be installed in this *steamlibrary*
 
 ### Restart KDE
-You need to restart KDE(re-login) after **reinstalling the plugin**  
-Please not use `kstart5 plasmashell`, which will cause freezing  
-Re-login is ok  
+You need to restart plasmashell after **reinstalling the plugin**  
+`systemctl --user restart plasma-plasmashell.service`  
+If you are using old kde, you can't run command above, please re-login.  
 
 ## Support Status
 ### Scene:
@@ -115,6 +115,7 @@ make
 [argparse](https://github.com/p-ranav/argparse) - Command line argument parser  
 [stb](https://github.com/nothings/stb) - Image loading  
 [vog/sha1](https://github.com/vog/sha1) - SHA-1  
+[effolkronium/random](https://github.com/effolkronium/random) - Random wrapper for modern C++   
 [miniaudio](https://github.com/mackron/miniaudio) - Audio loading and playback  
 [nlohmann/json](https://github.com/nlohmann/json) - Json parsing  
 [Eigen](https://eigen.tuxfamily.org/index.php) - Math operations  
@@ -149,9 +150,10 @@ make
 		- [ ] Duration 
 	- [x] Initializers
 	- [x] Operators
-		- [ ] Control Point Force
 	- [x] Control Points
-	- [ ] Children
+        - [ ] Mouse Follow
+	- [x] Children
+    - [ ] Audio Response
 - [x] Puppet warp
 - [ ] 3D model
 - [ ] Timeline animations
@@ -177,7 +179,7 @@ The config is set to `hwdec=auto`, and is not configurable for now.
 ## About integrating into other desktop environments
 There is no general way. If there is a way to have good support for most desktop environments, why not we just require wallpaper engine itself to support linux. Some similar apps like [lively](https://github.com/rocksdanister/lively) and [ScreenPlay](https://store.steampowered.com/app/672870/ScreenPlay) can benefit from that, but that way doesn't exist. Actually the integration and implement are separated, for all integration ways, the implement is shared. So if there is a general way, we can move to it easily.  
 
-The major work of this plugin is the scene wallpaper [renderer](src/backend_scene/wallpaper). If you want to integrate this into other desktop environments, here are some [examples](src/backend_scene/standalone_view). Currently this renderer is rendering under vulkan and sharing to opengl texture which will be read by qml(plasmashell) in kde. You can integrate this renderer into anything that can show vulkan or opengl textures.  
+The major work of this plugin is the scene wallpaper [renderer](src/backend_scene/src). If you want to integrate this into other desktop environments, here are some [examples](src/backend_scene/standalone_view). Currently this renderer is rendering under vulkan and sharing to opengl texture which will be read by qml(plasmashell) in kde. You can integrate this renderer into anything that can show vulkan or opengl textures.  
 
 ## Acknowledgments
 - [RePKG](https://github.com/notscuffed/repkg)
