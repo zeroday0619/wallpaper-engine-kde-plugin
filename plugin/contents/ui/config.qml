@@ -125,21 +125,17 @@ ColumnLayout {
 
 
     // Content
-
     PlasmaComponents.TabBar {
         id: bar
         implicitWidth: font.pixelSize*8 * 3
         PlasmaComponents.TabButton {
-            text: 'Wallpapers'
-            display: PlasmaComponents.TabButton.TextOnly
+            text: "Wallpapers"
         }
         PlasmaComponents.TabButton {
-            text: 'Settings'
-            display: PlasmaComponents.TabButton.TextOnly
+            text: "Settings"
         }
         PlasmaComponents.TabButton {
-            text: 'About'
-            display: PlasmaComponents.TabButton.TextOnly
+            text: "About"
         }
     }
 
